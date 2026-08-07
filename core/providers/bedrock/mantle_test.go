@@ -62,10 +62,11 @@ func TestMantleOpenAIURL(t *testing.T) {
 		{"gemma-3 uses bare v1", "us-east-1", "google.gemma-3-12b-it", "chat/completions",
 			"https://bedrock-mantle.us-east-1.api.aws/v1/chat/completions"},
 	}
+	provider := &BedrockProvider{}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := mantleOpenAIURL(tc.region, tc.model, tc.path); got != tc.want {
-				t.Errorf("mantleOpenAIURL(%q, %q, %q) = %q, want %q", tc.region, tc.model, tc.path, got, tc.want)
+			if got := provider.mantleOpenAIURL(schemas.Key{}, tc.region, tc.model, tc.path); got != tc.want {
+				t.Errorf("provider.mantleOpenAIURL(key, %q, %q, %q) = %q, want %q", tc.region, tc.model, tc.path, got, tc.want)
 			}
 		})
 	}
