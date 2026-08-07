@@ -6,11 +6,13 @@
 package bedrock
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	schemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/stretchr/testify/assert"
@@ -315,6 +317,37 @@ func TestBatchCreateInlineUploadHonorsS3EndpointOverride(t *testing.T) {
 	assert.Equal(t, hostOf(tsCP), cpReqs[0].host)
 	assert.Equal(t, http.MethodGet, cpReqs[1].method)
 	assert.Equal(t, hostOf(tsCP), cpReqs[1].host)
+}
+
+// TestBatchCreateInlineUploadBlocksPrivateS3Override proves the AWS-SDK-based
+// inline-batch upload path runs on the provider's SSRF-guarded transport: a
+// private endpoints.s3 override must be rejected at dial time with the
+// private-IP policy error, exactly like every raw-HTTP S3 operation
+// (see TestDialGuardBlocksPrivateEndpointOverride). The IP-literal target
+// keeps this hermetic — the guard rejects before any packet is sent. The
+// bounded context is a backstop so an unguarded (buggy) SDK client can't
+// stall the test on real dial retries.
+func TestBatchCreateInlineUploadBlocksPrivateS3Override(t *testing.T) {
+	clearEndpointEnv(t)
+	provider := newTestProviderWithBaseURL(t, "")
+	key := testBedrockSigV4Key(&schemas.BedrockEndpointsConfig{S3: "http://10.255.255.1:9"})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, bifrostErr := provider.BatchCreate(schemas.NewBifrostContext(ctx, schemas.NoDeadline), key, &schemas.BifrostBatchCreateRequest{
+		Model: schemas.Ptr("anthropic.claude-3-haiku-20240307-v1:0"),
+		Requests: []schemas.BatchRequestItem{
+			{CustomID: "r1", Body: map[string]interface{}{"messages": []interface{}{}}},
+		},
+		ExtraParams: map[string]interface{}{
+			"role_arn":      "arn:aws:iam::123456789012:role/batch",
+			"output_s3_uri": "s3://test-bucket/output/",
+		},
+	})
+	require.NotNil(t, bifrostErr)
+	require.NotNil(t, bifrostErr.Error)
+	require.NotNil(t, bifrostErr.Error.Error)
+	assert.Contains(t, bifrostErr.Error.Error.Error(), "private IP")
 }
 
 // TestSigV4SigningOverCustomHost locks in that SigV4 signing follows the

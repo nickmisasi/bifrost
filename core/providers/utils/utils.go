@@ -561,16 +561,8 @@ func ConfigureDialer(client *fasthttp.Client, allowPrivateNetwork bool) *fasthtt
 			}
 			var lastErr error
 			for _, ip := range ips {
-				// Unspecified (0.0.0.0, ::) and link-local (169.254.x.x, fe80::) are always blocked
-				if ip.IsUnspecified() {
-					return nil, fmt.Errorf("connection to unspecified IP %s is not allowed", ip)
-				}
-				if network.IsLinkLocal(ip) {
-					return nil, fmt.Errorf("connection to link-local IP %s is not allowed", ip)
-				}
-				// RFC 1918 blocked unless operator explicitly opted in; loopback always allowed
-				if !ip.IsLoopback() && !allowPrivateNetwork && network.IsPrivateIP(ip) {
-					return nil, fmt.Errorf("connection to private IP %s is not allowed", ip)
+				if policyErr := ipPolicyErr(ip, allowPrivateNetwork); policyErr != nil {
+					return nil, policyErr
 				}
 				conn, err = dialer.Dial("tcp", net.JoinHostPort(ip.String(), port))
 				if err == nil {
@@ -603,6 +595,24 @@ func ConfigureDialer(client *fasthttp.Client, allowPrivateNetwork bool) *fasthtt
 // substitute a fake to exercise the dial policy without real DNS.
 type ipResolver interface {
 	LookupIP(ctx context.Context, network, host string) ([]net.IP, error)
+}
+
+// ipPolicyErr is the single source of truth for the per-IP SSRF policy shared
+// by ConfigureDialer (fasthttp) and ConfigureHTTPTransportDialer (net/http):
+// unspecified (0.0.0.0, ::) and link-local (169.254.x.x, fe80::) are always
+// blocked; RFC 1918 is blocked unless the operator explicitly opted in;
+// loopback is always allowed. Returns nil when the IP may be dialed.
+func ipPolicyErr(ip net.IP, allowPrivateNetwork bool) error {
+	if ip.IsUnspecified() {
+		return fmt.Errorf("connection to unspecified IP %s is not allowed", ip)
+	}
+	if network.IsLinkLocal(ip) {
+		return fmt.Errorf("connection to link-local IP %s is not allowed", ip)
+	}
+	if !ip.IsLoopback() && !allowPrivateNetwork && network.IsPrivateIP(ip) {
+		return fmt.Errorf("connection to private IP %s is not allowed", ip)
+	}
+	return nil
 }
 
 // ConfigureHTTPTransportDialer is the net/http analogue of ConfigureDialer's
@@ -657,14 +667,8 @@ func httpPolicyDialContext(resolver ipResolver, dial func(ctx context.Context, n
 		}
 		var lastErr error
 		for _, ip := range ips {
-			if ip.IsUnspecified() {
-				return nil, fmt.Errorf("connection to unspecified IP %s is not allowed", ip)
-			}
-			if network.IsLinkLocal(ip) {
-				return nil, fmt.Errorf("connection to link-local IP %s is not allowed", ip)
-			}
-			if !ip.IsLoopback() && !allowPrivateNetwork && network.IsPrivateIP(ip) {
-				return nil, fmt.Errorf("connection to private IP %s is not allowed", ip)
+			if policyErr := ipPolicyErr(ip, allowPrivateNetwork); policyErr != nil {
+				return nil, policyErr
 			}
 			conn, dialErr := dial(ctx, netw, net.JoinHostPort(ip.String(), port))
 			if dialErr == nil {

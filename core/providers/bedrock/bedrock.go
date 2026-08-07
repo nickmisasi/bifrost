@@ -3138,7 +3138,13 @@ func (provider *BedrockProvider) BatchCreate(ctx *schemas.BifrostContext, key sc
 
 		// Upload to S3 using Bedrock credentials. Only the explicit per-key
 		// endpoints.s3 override is threaded through — the AWS SDK already
-		// honors the AWS_ENDPOINT_URL_* env layer natively.
+		// honors the AWS_ENDPOINT_URL_* env layer natively, and the dns_suffix
+		// layer is approximated by the SDK's built-in partition data (correct
+		// for recognized ISO/China regions, not for a custom suffix on an
+		// unrecognized region — set endpoints.s3 explicitly in that case).
+		// The streamingClient carries the SSRF-guarded transport without a
+		// client-level Timeout, so the SDK's own per-attempt timeouts and
+		// retries govern large uploads instead of the unary client's deadline.
 		if bifrostErr := uploadToS3(
 			ctx,
 			key.BedrockKeyConfig.AccessKey.GetValue(),
@@ -3148,6 +3154,7 @@ func (provider *BedrockProvider) BatchCreate(ctx *schemas.BifrostContext, key sc
 			bucket,
 			s3Key,
 			keyEndpointOverride(key, serviceS3),
+			provider.streamingClient,
 			jsonlData,
 		); bifrostErr != nil {
 			return nil, bifrostErr

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -19,6 +20,10 @@ import (
 // is applied as the SDK BaseEndpoint with path-style addressing (matching
 // s3BucketBase). The AWS_ENDPOINT_URL_* env layer is honored natively by the
 // SDK, so it must not be passed here.
+// httpClient, when non-nil, replaces the SDK's default HTTP client so the
+// upload runs on the provider's SSRF-guarded transport — otherwise a per-key
+// endpoint override would travel the one client without the dial-time
+// private-network policy.
 func uploadToS3(
 	ctx context.Context,
 	accessKey, secretKey string,
@@ -26,11 +31,17 @@ func uploadToS3(
 	region string,
 	bucket, key string,
 	endpoint string,
+	httpClient *http.Client,
 	content []byte,
 ) *schemas.BifrostError {
 	// Create AWS config with credentials
 	var cfg aws.Config
 	var err error
+
+	loadOpts := []func(*config.LoadOptions) error{config.WithRegion(region)}
+	if httpClient != nil {
+		loadOpts = append(loadOpts, config.WithHTTPClient(httpClient))
+	}
 
 	if accessKey != "" && secretKey != "" {
 		// Use provided credentials
@@ -40,15 +51,10 @@ func uploadToS3(
 		} else {
 			creds = credentials.NewStaticCredentialsProvider(accessKey, secretKey, "")
 		}
-
-		cfg, err = config.LoadDefaultConfig(ctx,
-			config.WithRegion(region),
-			config.WithCredentialsProvider(creds),
-		)
-	} else {
-		// Use default credentials chain (IAM role, env vars, etc.)
-		cfg, err = config.LoadDefaultConfig(ctx, config.WithRegion(region))
+		loadOpts = append(loadOpts, config.WithCredentialsProvider(creds))
 	}
+
+	cfg, err = config.LoadDefaultConfig(ctx, loadOpts...)
 
 	if err != nil {
 		return providerUtils.NewBifrostOperationError("failed to load aws config for s3", err)
