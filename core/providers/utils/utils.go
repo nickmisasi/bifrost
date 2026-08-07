@@ -597,6 +597,20 @@ type ipResolver interface {
 	LookupIP(ctx context.Context, network, host string) ([]net.IP, error)
 }
 
+// DialPolicyError reports a destination rejected by the dial-time SSRF policy.
+type DialPolicyError struct {
+	message string
+}
+
+func (e *DialPolicyError) Error() string {
+	return e.message
+}
+
+// RetryableError marks deterministic policy rejections as terminal.
+func (*DialPolicyError) RetryableError() bool {
+	return false
+}
+
 // ipPolicyErr is the single source of truth for the per-IP SSRF policy shared
 // by ConfigureDialer (fasthttp) and ConfigureHTTPTransportDialer (net/http):
 // unspecified (0.0.0.0, ::) and link-local (169.254.x.x, fe80::) are always
@@ -604,13 +618,13 @@ type ipResolver interface {
 // loopback is always allowed. Returns nil when the IP may be dialed.
 func ipPolicyErr(ip net.IP, allowPrivateNetwork bool) error {
 	if ip.IsUnspecified() {
-		return fmt.Errorf("connection to unspecified IP %s is not allowed", ip)
+		return &DialPolicyError{message: fmt.Sprintf("connection to unspecified IP %s is not allowed", ip)}
 	}
 	if network.IsLinkLocal(ip) {
-		return fmt.Errorf("connection to link-local IP %s is not allowed", ip)
+		return &DialPolicyError{message: fmt.Sprintf("connection to link-local IP %s is not allowed", ip)}
 	}
 	if !ip.IsLoopback() && !allowPrivateNetwork && network.IsPrivateIP(ip) {
-		return fmt.Errorf("connection to private IP %s is not allowed", ip)
+		return &DialPolicyError{message: fmt.Sprintf("connection to private IP %s is not allowed", ip)}
 	}
 	return nil
 }

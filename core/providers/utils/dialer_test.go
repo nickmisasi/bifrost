@@ -2,6 +2,7 @@ package utils
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -455,8 +456,13 @@ func TestHTTPPolicyDialContext_PrivatePolicy(t *testing.T) {
 		var dialed []string
 		dialCtx := httpPolicyDialContext(resolver, stubDial(&dialed), time.Second, false)
 		_, err := dialCtx(context.Background(), "tcp", "internal.corp:443")
-		if err == nil || !strings.Contains(err.Error(), "private IP") {
-			t.Fatalf("expected private-IP rejection, got %v", err)
+		const wantErr = "connection to private IP 10.0.0.5 is not allowed"
+		if err == nil || err.Error() != wantErr {
+			t.Fatalf("expected %q, got %v", wantErr, err)
+		}
+		var policyErr *DialPolicyError
+		if !errors.As(err, &policyErr) || policyErr.RetryableError() {
+			t.Fatalf("expected typed non-retryable dial-policy error, got %T", err)
 		}
 		if len(dialed) != 0 {
 			t.Errorf("no dial should happen for a blocked target, dialed %v", dialed)
