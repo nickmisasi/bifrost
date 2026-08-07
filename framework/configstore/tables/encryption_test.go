@@ -191,6 +191,11 @@ func TestTableKey_BedrockFieldsEncryptDecrypt(t *testing.T) {
 					{BucketName: "my-batch-bucket", Prefix: "jobs/", IsDefault: true},
 				},
 			},
+			Endpoints: &schemas.BedrockEndpointsConfig{
+				Runtime:   "https://vpce-0abc.bedrock-runtime.us-west-2.vpce.amazonaws.com",
+				S3:        "https://vpce-0def.s3.us-west-2.vpce.amazonaws.com",
+				DNSSuffix: "c2s.ic.gov",
+			},
 		},
 	}
 
@@ -217,6 +222,9 @@ func TestTableKey_BedrockFieldsEncryptDecrypt(t *testing.T) {
 	if rawBatch, ok := raw["bedrock_batch_s3_config_json"].(string); ok {
 		assert.NotContains(t, rawBatch, "my-batch-bucket")
 	}
+	if rawEndpoints, ok := raw["bedrock_endpoints_json"].(string); ok {
+		assert.NotContains(t, rawEndpoints, "vpce-0abc")
+	}
 
 	var found TableKey
 	require.NoError(t, db.First(&found, key.ID).Error)
@@ -235,6 +243,10 @@ func TestTableKey_BedrockFieldsEncryptDecrypt(t *testing.T) {
 	assert.Equal(t, "my-batch-bucket", found.BedrockKeyConfig.BatchS3Config.Buckets[0].BucketName)
 	assert.Equal(t, "jobs/", found.BedrockKeyConfig.BatchS3Config.Buckets[0].Prefix)
 	assert.True(t, found.BedrockKeyConfig.BatchS3Config.Buckets[0].IsDefault)
+	require.NotNil(t, found.BedrockKeyConfig.Endpoints, "endpoint overrides must survive the SQL round trip")
+	assert.Equal(t, "https://vpce-0abc.bedrock-runtime.us-west-2.vpce.amazonaws.com", found.BedrockKeyConfig.Endpoints.Runtime)
+	assert.Equal(t, "https://vpce-0def.s3.us-west-2.vpce.amazonaws.com", found.BedrockKeyConfig.Endpoints.S3)
+	assert.Equal(t, "c2s.ic.gov", found.BedrockKeyConfig.Endpoints.DNSSuffix)
 }
 
 func TestTableKey_SecretVarNotEncrypted(t *testing.T) {

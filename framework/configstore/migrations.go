@@ -457,6 +457,7 @@ var configstoreMigrationSteps = []migrationStep{
 	{IDs: []string{"add_budget_override_anchor_columns"}, run: migrationAddBudgetOverrideAnchorColumns},
 	{IDs: []string{"add_live_models_sync_interval_column"}, run: migrationAddLiveModelsSyncIntervalColumn},
 	{IDs: []string{"add_pricing_override_user_id_column"}, run: migrationAddPricingOverrideUserIDColumn},
+	{IDs: []string{"add_bedrock_endpoints_json_column"}, run: migrationAddBedrockEndpointsJSONColumn},
 }
 
 // quoteSQLiteIdentifier quotes a SQLite identifier, escaping any double quotes.
@@ -4862,6 +4863,35 @@ func migrationAddReplicateDeploymentsJSONColumn(ctx context.Context, db *gorm.DB
 	}})
 	if err := m.Migrate(); err != nil {
 		return fmt.Errorf("error while running replicate deployments JSON migration: %s", err.Error())
+	}
+	return nil
+}
+
+// migrationAddBedrockEndpointsJSONColumn adds the bedrock_endpoints_json column
+// to the config_keys table (per-service Bedrock endpoint overrides).
+func migrationAddBedrockEndpointsJSONColumn(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	migrationName := "add_bedrock_endpoints_json_column"
+	logger.Info("[configstore] starting migration %s", migrationName)
+	defer logger.Info("[configstore] finished migration %s", migrationName)
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID: migrationName,
+		Migrate: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			if err := addColumnIfNotExists(tx, logger, &tables.TableKey{}, "bedrock_endpoints_json"); err != nil {
+				return fmt.Errorf("failed to add bedrock_endpoints_json column: %w", err)
+			}
+			return nil
+		},
+		Rollback: func(tx *gorm.DB) error {
+			tx = tx.WithContext(ctx)
+			if err := dropColumnIfExists(tx, logger, &tables.TableKey{}, "bedrock_endpoints_json"); err != nil {
+				return fmt.Errorf("failed to drop bedrock_endpoints_json column: %w", err)
+			}
+			return nil
+		},
+	}})
+	if err := m.Migrate(); err != nil {
+		return fmt.Errorf("error while running bedrock endpoints JSON migration: %s", err.Error())
 	}
 	return nil
 }

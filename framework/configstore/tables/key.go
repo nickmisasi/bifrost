@@ -58,6 +58,7 @@ type TableKey struct {
 	BedrockBatchRoleARN      *schemas.SecretVar `gorm:"type:text" json:"bedrock_batch_role_arn,omitempty"`
 	BedrockProjectID         *schemas.SecretVar `gorm:"type:text" json:"bedrock_project_id,omitempty"`
 	BedrockBatchS3ConfigJSON *string            `gorm:"type:text" json:"-"` // JSON serialized schemas.BatchS3Config
+	BedrockEndpointsJSON     *string            `gorm:"type:text" json:"-"` // JSON serialized schemas.BedrockEndpointsConfig
 
 	// Bedrock Mantle config fields (embedded)
 	BedrockMantleAccessKey       *schemas.SecretVar `gorm:"type:text" json:"bedrock_mantle_access_key,omitempty"`
@@ -300,6 +301,16 @@ func (k *TableKey) BeforeSave(tx *gorm.DB) error {
 		} else {
 			k.BedrockBatchS3ConfigJSON = nil
 		}
+		if k.BedrockKeyConfig.Endpoints != nil {
+			data, err := sonic.Marshal(k.BedrockKeyConfig.Endpoints)
+			if err != nil {
+				return err
+			}
+			s := string(data)
+			k.BedrockEndpointsJSON = &s
+		} else {
+			k.BedrockEndpointsJSON = nil
+		}
 	} else {
 		k.BedrockAccessKey = nil
 		k.BedrockSecretKey = nil
@@ -312,6 +323,7 @@ func (k *TableKey) BeforeSave(tx *gorm.DB) error {
 		k.BedrockBatchRoleARN = nil
 		k.BedrockProjectID = nil
 		k.BedrockBatchS3ConfigJSON = nil
+		k.BedrockEndpointsJSON = nil
 	}
 
 	if k.BedrockMantleKeyConfig != nil {
@@ -502,6 +514,9 @@ func (k *TableKey) BeforeSave(tx *gorm.DB) error {
 		if err := encryptString(k.BedrockBatchS3ConfigJSON); err != nil {
 			return fmt.Errorf("failed to encrypt bedrock batch s3 config: %w", err)
 		}
+		if err := encryptString(k.BedrockEndpointsJSON); err != nil {
+			return fmt.Errorf("failed to encrypt bedrock endpoints: %w", err)
+		}
 		// Bedrock Mantle
 		if err := encryptSecretVarPtr(&k.BedrockMantleAccessKey); err != nil {
 			return fmt.Errorf("failed to encrypt bedrock mantle access key: %w", err)
@@ -617,6 +632,9 @@ func (k *TableKey) AfterFind(tx *gorm.DB) error {
 		if err := decryptString(k.BedrockBatchS3ConfigJSON); err != nil {
 			return fmt.Errorf("failed to decrypt bedrock batch s3 config: %w", err)
 		}
+		if err := decryptString(k.BedrockEndpointsJSON); err != nil {
+			return fmt.Errorf("failed to decrypt bedrock endpoints: %w", err)
+		}
 		// Bedrock Mantle
 		if err := decryptSecretVarPtr(&k.BedrockMantleAccessKey); err != nil {
 			return fmt.Errorf("failed to decrypt bedrock mantle access key: %w", err)
@@ -728,7 +746,7 @@ func (k *TableKey) AfterFind(tx *gorm.DB) error {
 		k.VertexKeyConfig = config
 	}
 	// Reconstruct Bedrock config if fields are present
-	if k.BedrockAccessKey != nil || k.BedrockSecretKey != nil || k.BedrockSessionToken != nil || k.BedrockRegion != nil || k.BedrockARN != nil || k.BedrockRoleARN != nil || k.BedrockExternalID != nil || k.BedrockRoleSessionName != nil || k.BedrockBatchRoleARN != nil || k.BedrockProjectID != nil || (k.BedrockBatchS3ConfigJSON != nil && *k.BedrockBatchS3ConfigJSON != "") {
+	if k.BedrockAccessKey != nil || k.BedrockSecretKey != nil || k.BedrockSessionToken != nil || k.BedrockRegion != nil || k.BedrockARN != nil || k.BedrockRoleARN != nil || k.BedrockExternalID != nil || k.BedrockRoleSessionName != nil || k.BedrockBatchRoleARN != nil || k.BedrockProjectID != nil || (k.BedrockBatchS3ConfigJSON != nil && *k.BedrockBatchS3ConfigJSON != "") || (k.BedrockEndpointsJSON != nil && *k.BedrockEndpointsJSON != "") {
 		bedrockConfig := &schemas.BedrockKeyConfig{}
 
 		if k.BedrockAccessKey != nil {
@@ -754,6 +772,14 @@ func (k *TableKey) AfterFind(tx *gorm.DB) error {
 				return err
 			}
 			bedrockConfig.BatchS3Config = &batchS3Config
+		}
+
+		if k.BedrockEndpointsJSON != nil && *k.BedrockEndpointsJSON != "" {
+			var endpoints schemas.BedrockEndpointsConfig
+			if err := json.Unmarshal([]byte(*k.BedrockEndpointsJSON), &endpoints); err != nil {
+				return err
+			}
+			bedrockConfig.Endpoints = &endpoints
 		}
 
 		k.BedrockKeyConfig = bedrockConfig
