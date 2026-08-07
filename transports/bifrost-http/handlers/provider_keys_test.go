@@ -415,3 +415,75 @@ func TestCreateProviderKey_CustomBedrockRequiresRegion(t *testing.T) {
 		t.Fatalf("expected bedrock_key_config.region error, got %s", body)
 	}
 }
+
+// TestValidateBedrockKeyEndpoints covers the gateway-side SSRF/shape gate for
+// Bedrock endpoint overrides: per-field URL validation, allow_private_network
+// gating, query/fragment rejection (misroute prevention), and dns_suffix
+// validation (which redirects every amazonaws.com-shaped service and must be
+// held to the same bar as the explicit URL fields).
+//
+// Cases marked "resolves via live DNS" depend on public DNS, matching how
+// ValidateExternalURL itself behaves for hostname URLs everywhere else in the
+// gateway.
+func TestValidateBedrockKeyEndpoints(t *testing.T) {
+	bedrockKey := func(ep *schemas.BedrockEndpointsConfig) schemas.Key {
+		return schemas.Key{BedrockKeyConfig: &schemas.BedrockKeyConfig{
+			Region:    schemas.NewSecretVar("us-east-1"),
+			Endpoints: ep,
+		}}
+	}
+
+	cases := []struct {
+		name         string
+		key          schemas.Key
+		allowPrivate bool
+		wantErr      string // "" = expect nil error; otherwise substring of the error
+	}{
+		{"nil bedrock config", schemas.Key{}, false, ""},
+		{"nil endpoints", bedrockKey(nil), false, ""},
+		{"bad scheme names the field", bedrockKey(&schemas.BedrockEndpointsConfig{ControlPlane: "ftp://x"}), false,
+			"endpoints.control_plane"},
+		{"private IP blocked by default", bedrockKey(&schemas.BedrockEndpointsConfig{Runtime: "http://10.0.0.1"}), false,
+			"endpoints.runtime"},
+		{"private IP allowed when gated on", bedrockKey(&schemas.BedrockEndpointsConfig{Runtime: "http://10.0.0.1"}), true, ""},
+		{"loopback allowed (dev parity with ValidateExternalURL)", bedrockKey(&schemas.BedrockEndpointsConfig{Runtime: "http://127.0.0.1:9"}), false, ""},
+		{"query rejected", bedrockKey(&schemas.BedrockEndpointsConfig{Runtime: "http://127.0.0.1:9?x=1"}), false,
+			"endpoints.runtime"},
+		{"bare query delimiter rejected", bedrockKey(&schemas.BedrockEndpointsConfig{S3: "http://127.0.0.1:9?"}), false,
+			"endpoints.s3"},
+		{"fragment rejected", bedrockKey(&schemas.BedrockEndpointsConfig{Mantle: "http://127.0.0.1:9#frag"}), false,
+			"endpoints.mantle"},
+		{"bare fragment delimiter rejected", bedrockKey(&schemas.BedrockEndpointsConfig{AgentRuntime: "http://127.0.0.1:9#"}), false,
+			"endpoints.agent_runtime"},
+		{"dns_suffix localhost rejected", bedrockKey(&schemas.BedrockEndpointsConfig{DNSSuffix: "localhost"}), true,
+			"endpoints.dns_suffix"},
+		{"dns_suffix .localhost subdomain rejected", bedrockKey(&schemas.BedrockEndpointsConfig{DNSSuffix: "svc.localhost"}), true,
+			"endpoints.dns_suffix"},
+		{"dns_suffix with path rejected", bedrockKey(&schemas.BedrockEndpointsConfig{DNSSuffix: "evil.com/path"}), true,
+			"endpoints.dns_suffix"},
+		{"dns_suffix with whitespace rejected", bedrockKey(&schemas.BedrockEndpointsConfig{DNSSuffix: "c2s ic gov"}), true,
+			"endpoints.dns_suffix"},
+		{"dns_suffix dots-only rejected", bedrockKey(&schemas.BedrockEndpointsConfig{DNSSuffix: "..."}), true,
+			"endpoints.dns_suffix"},
+		{"dns_suffix leading hyphen rejected", bedrockKey(&schemas.BedrockEndpointsConfig{DNSSuffix: "-bad.example"}), true,
+			"endpoints.dns_suffix"},
+		{"dns_suffix unresolvable rejected by probe", bedrockKey(&schemas.BedrockEndpointsConfig{DNSSuffix: "test.invalid"}), true,
+			"endpoints.dns_suffix"},
+		{"dns_suffix commercial partition ok (resolves via live DNS)", bedrockKey(&schemas.BedrockEndpointsConfig{DNSSuffix: "amazonaws.com"}), false, ""},
+		{"dns_suffix stray dots trimmed before probe (resolves via live DNS)", bedrockKey(&schemas.BedrockEndpointsConfig{DNSSuffix: ".amazonaws.com."}), false, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateBedrockKeyEndpoints(tc.key, tc.allowPrivate)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected no error, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}

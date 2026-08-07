@@ -4083,6 +4083,42 @@
                     }
                   },
                   "additionalProperties": false
+                },
+                "endpoints": {
+                  "type": "object",
+                  "description": "Optional per-service AWS endpoint overrides for this key. Unset services fall back to network_config.base_url (bedrock-runtime only), then the AWS_ENDPOINT_URL_* environment variables, then dns_suffix, then the commercial-partition default. URLs must be absolute (http or https) without a query or fragment.",
+                  "properties": {
+                    "runtime": {
+                      "type": "string",
+                      "format": "uri",
+                      "description": "Override for the bedrock-runtime endpoint (Converse/Invoke/CountTokens, unary and streaming), e.g. a VPC endpoint URL."
+                    },
+                    "control_plane": {
+                      "type": "string",
+                      "format": "uri",
+                      "description": "Override for the bedrock control-plane endpoint (ListFoundationModels, model-invocation-job batch APIs)."
+                    },
+                    "agent_runtime": {
+                      "type": "string",
+                      "format": "uri",
+                      "description": "Override for the bedrock-agent-runtime endpoint (Rerank)."
+                    },
+                    "s3": {
+                      "type": "string",
+                      "format": "uri",
+                      "description": "Override for the S3 endpoint used for file/batch storage. Path-style addressing ({endpoint}/{bucket}/...) is used when set."
+                    },
+                    "mantle": {
+                      "type": "string",
+                      "format": "uri",
+                      "description": "Override for the bedrock-mantle OpenAI-compatible endpoint (gpt-*/Gemma-4 models)."
+                    },
+                    "dns_suffix": {
+                      "type": "string",
+                      "description": "Replaces the amazonaws.com partition DNS suffix in every default host shape at once (e.g. c2s.ic.gov for aws-iso, sc2s.sgov.gov for aws-iso-b, amazonaws.com.cn for aws-cn). Explicit URL fields take precedence per service. Does not apply to mantle."
+                    }
+                  },
+                  "additionalProperties": false
                 }
               },
               "required": ["region"],

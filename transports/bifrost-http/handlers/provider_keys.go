@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
+	"strings"
 
 	"github.com/bytedance/sonic"
 	"github.com/google/uuid"
@@ -104,6 +106,12 @@ func (h *ProviderHandler) createProviderKey(ctx *fasthttp.RequestCtx) {
 	}
 
 	if err := validateProviderKeyURL(baseProvider, key); err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, err.Error())
+		return
+	}
+
+	allowPrivateNetwork := providerConfig.NetworkConfig != nil && providerConfig.NetworkConfig.AllowPrivateNetwork
+	if err := validateBedrockKeyEndpoints(key, allowPrivateNetwork); err != nil {
 		SendError(ctx, fasthttp.StatusBadRequest, err.Error())
 		return
 	}
@@ -226,6 +234,12 @@ func (h *ProviderHandler) updateProviderKey(ctx *fasthttp.RequestCtx) {
 	}
 
 	if err := validateProviderKeyURL(baseProvider, mergedKey); err != nil {
+		SendError(ctx, fasthttp.StatusBadRequest, err.Error())
+		return
+	}
+
+	allowPrivateNetwork := providerConfig.NetworkConfig != nil && providerConfig.NetworkConfig.AllowPrivateNetwork
+	if err := validateBedrockKeyEndpoints(mergedKey, allowPrivateNetwork); err != nil {
 		SendError(ctx, fasthttp.StatusBadRequest, err.Error())
 		return
 	}
@@ -620,6 +634,64 @@ func validateProviderKeyURL(provider schemas.ModelProvider, key schemas.Key) err
 		}
 		if key.VLLMKeyConfig.ModelName == "" {
 			return fmt.Errorf("vllm_key_config.model_name is required for VLLM keys")
+		}
+	}
+	return nil
+}
+
+// bedrockDNSSuffixRegex constrains a dns_suffix (after trimming surrounding
+// whitespace and dots) to hostname labels: alphanumeric edges with interior
+// dots and hyphens.
+var bedrockDNSSuffixRegex = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$`)
+
+// validateBedrockKeyEndpoints runs ValidateExternalURL over every non-empty
+// per-service endpoint override on a Bedrock key config. allowPrivateNetwork
+// comes from the provider's network_config (VPC endpoints resolve to private
+// IPs, so VPCE users must set allow_private_network: true). URLs must not
+// carry a query or fragment — the provider appends request paths to the
+// override, and a '?' or '#' would swallow the path and silently misroute.
+func validateBedrockKeyEndpoints(key schemas.Key, allowPrivateNetwork bool) error {
+	if key.BedrockKeyConfig == nil || key.BedrockKeyConfig.Endpoints == nil {
+		return nil
+	}
+	ep := key.BedrockKeyConfig.Endpoints
+	for _, field := range []struct {
+		name  string
+		value string
+	}{
+		{"runtime", ep.Runtime},
+		{"control_plane", ep.ControlPlane},
+		{"agent_runtime", ep.AgentRuntime},
+		{"s3", ep.S3},
+		{"mantle", ep.Mantle},
+	} {
+		if field.value == "" {
+			continue
+		}
+		if strings.ContainsAny(field.value, "?#") {
+			return fmt.Errorf("invalid bedrock_key_config.endpoints.%s: URL must not contain a query or fragment", field.name)
+		}
+		if err := bifrost.ValidateExternalURL(field.value, allowPrivateNetwork); err != nil {
+			return fmt.Errorf("invalid bedrock_key_config.endpoints.%s: %v", field.name, err)
+		}
+	}
+	if ep.DNSSuffix != "" {
+		suffix := strings.Trim(strings.TrimSpace(ep.DNSSuffix), ".")
+		if suffix == "" || !bedrockDNSSuffixRegex.MatchString(suffix) {
+			return fmt.Errorf("invalid bedrock_key_config.endpoints.dns_suffix: %q is not a valid DNS suffix", ep.DNSSuffix)
+		}
+		if suffix == "localhost" || strings.HasSuffix(suffix, ".localhost") {
+			return fmt.Errorf("invalid bedrock_key_config.endpoints.dns_suffix: %q is loopback-reserved (RFC 6761); use explicit endpoint URLs for local development", ep.DNSSuffix)
+		}
+		// dns_suffix redirects every amazonaws.com-shaped service exactly like
+		// an explicit endpoint does, so probe the resulting runtime host
+		// through the same SSRF gate the URL fields go through.
+		region := "us-east-1" // placeholder; validateProviderKeyURL guarantees a real region on Bedrock keys
+		if key.BedrockKeyConfig.Region != nil && key.BedrockKeyConfig.Region.GetValue() != "" {
+			region = key.BedrockKeyConfig.Region.GetValue()
+		}
+		if err := bifrost.ValidateExternalURL(fmt.Sprintf("https://bedrock-runtime.%s.%s", region, suffix), allowPrivateNetwork); err != nil {
+			return fmt.Errorf("invalid bedrock_key_config.endpoints.dns_suffix: %v", err)
 		}
 	}
 	return nil
