@@ -722,10 +722,33 @@ type BedrockKeyConfig struct {
 	ProjectID *SecretVar `json:"project_id,omitempty"`
 
 	BatchS3Config *BatchS3Config `json:"batch_s3_config,omitempty"` // S3 bucket configuration for batch operations
+
+	// Endpoints optionally overrides the AWS endpoint used for each Bedrock-related
+	// service. Every field is optional; unset services fall back to
+	// NetworkConfig.BaseURL (bedrock-runtime only), then the AWS_ENDPOINT_URL_*
+	// environment variables, then DNSSuffix, then the commercial-partition default.
+	// URLs must be absolute (http or https) without a query or fragment, e.g.
+	// "https://vpce-0abc-xyz.bedrock-runtime.us-east-1.vpce.amazonaws.com".
+	Endpoints *BedrockEndpointsConfig `json:"endpoints,omitempty"`
 }
 
 // NOTE: To use Bedrock IAM role authentication, set both AccessKey and SecretKey to empty strings.
 // To use Bedrock API Key authentication, set Value in Key struct instead.
+
+// BedrockEndpointsConfig carries per-service endpoint overrides for the Bedrock
+// provider. See BedrockKeyConfig.Endpoints.
+type BedrockEndpointsConfig struct {
+	Runtime      string `json:"runtime,omitempty"`       // bedrock-runtime.{region} (Converse/Invoke/CountTokens, unary + streaming)
+	ControlPlane string `json:"control_plane,omitempty"` // bedrock.{region} (ListFoundationModels, model-invocation-job batch APIs)
+	AgentRuntime string `json:"agent_runtime,omitempty"` // bedrock-agent-runtime.{region} (Rerank)
+	S3           string `json:"s3,omitempty"`            // S3 file/batch storage; path-style addressing is used with this override
+	Mantle       string `json:"mantle,omitempty"`        // bedrock-mantle.{region}.api.aws (OpenAI-compatible sub-surface)
+	// DNSSuffix replaces the "amazonaws.com" partition suffix in every default
+	// host shape at once (e.g. "c2s.ic.gov" for aws-iso, "sc2s.sgov.gov" for
+	// aws-iso-b, "amazonaws.com.cn" for aws-cn). Explicit URL fields above take
+	// precedence per service. Does not apply to Mantle (api.aws host).
+	DNSSuffix string `json:"dns_suffix,omitempty"`
+}
 
 // BedrockMantleKeyConfig represents the Bedrock Mantle-specific configuration. Mantle serves
 // Claude (native-Anthropic Messages), OpenAI-compatible, and Gemma models on the
