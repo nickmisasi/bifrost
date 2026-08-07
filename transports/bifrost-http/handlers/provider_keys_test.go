@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -422,9 +423,10 @@ func TestCreateProviderKey_CustomBedrockRequiresRegion(t *testing.T) {
 // validation (which redirects every amazonaws.com-shaped service and must be
 // held to the same bar as the explicit URL fields).
 //
-// Cases marked "resolves via live DNS" depend on public DNS, matching how
-// ValidateExternalURL itself behaves for hostname URLs everywhere else in the
-// gateway.
+// Cases marked needsDNS depend on the machine's resolver (matching how
+// ValidateExternalURL behaves for hostname URLs everywhere else in the
+// gateway) and are skipped unless BIFROST_TEST_LIVE_DNS is set, so offline or
+// NXDOMAIN-hijacking resolvers can't flake default runs.
 func TestValidateBedrockKeyEndpoints(t *testing.T) {
 	bedrockKey := func(ep *schemas.BedrockEndpointsConfig) schemas.Key {
 		return schemas.Key{BedrockKeyConfig: &schemas.BedrockKeyConfig{
@@ -438,42 +440,62 @@ func TestValidateBedrockKeyEndpoints(t *testing.T) {
 		key          schemas.Key
 		allowPrivate bool
 		wantErr      string // "" = expect nil error; otherwise substring of the error
+		needsDNS     bool   // requires outbound DNS; skipped without BIFROST_TEST_LIVE_DNS
 	}{
-		{"nil bedrock config", schemas.Key{}, false, ""},
-		{"nil endpoints", bedrockKey(nil), false, ""},
+		{"nil bedrock config", schemas.Key{}, false, "", false},
+		{"nil endpoints", bedrockKey(nil), false, "", false},
 		{"bad scheme names the field", bedrockKey(&schemas.BedrockEndpointsConfig{ControlPlane: "ftp://x"}), false,
-			"endpoints.control_plane"},
+			"endpoints.control_plane", false},
 		{"private IP blocked by default", bedrockKey(&schemas.BedrockEndpointsConfig{Runtime: "http://10.0.0.1"}), false,
-			"endpoints.runtime"},
-		{"private IP allowed when gated on", bedrockKey(&schemas.BedrockEndpointsConfig{Runtime: "http://10.0.0.1"}), true, ""},
-		{"loopback allowed (dev parity with ValidateExternalURL)", bedrockKey(&schemas.BedrockEndpointsConfig{Runtime: "http://127.0.0.1:9"}), false, ""},
+			"endpoints.runtime", false},
+		{"private IP allowed when gated on", bedrockKey(&schemas.BedrockEndpointsConfig{Runtime: "http://10.0.0.1"}), true, "", false},
+		{"loopback allowed (dev parity with ValidateExternalURL)", bedrockKey(&schemas.BedrockEndpointsConfig{Runtime: "http://127.0.0.1:9"}), false, "", false},
 		{"query rejected", bedrockKey(&schemas.BedrockEndpointsConfig{Runtime: "http://127.0.0.1:9?x=1"}), false,
-			"endpoints.runtime"},
+			"endpoints.runtime", false},
 		{"bare query delimiter rejected", bedrockKey(&schemas.BedrockEndpointsConfig{S3: "http://127.0.0.1:9?"}), false,
-			"endpoints.s3"},
+			"endpoints.s3", false},
 		{"fragment rejected", bedrockKey(&schemas.BedrockEndpointsConfig{Mantle: "http://127.0.0.1:9#frag"}), false,
-			"endpoints.mantle"},
+			"endpoints.mantle", false},
 		{"bare fragment delimiter rejected", bedrockKey(&schemas.BedrockEndpointsConfig{AgentRuntime: "http://127.0.0.1:9#"}), false,
-			"endpoints.agent_runtime"},
+			"endpoints.agent_runtime", false},
 		{"dns_suffix localhost rejected", bedrockKey(&schemas.BedrockEndpointsConfig{DNSSuffix: "localhost"}), true,
-			"endpoints.dns_suffix"},
+			"endpoints.dns_suffix", false},
 		{"dns_suffix .localhost subdomain rejected", bedrockKey(&schemas.BedrockEndpointsConfig{DNSSuffix: "svc.localhost"}), true,
-			"endpoints.dns_suffix"},
+			"endpoints.dns_suffix", false},
 		{"dns_suffix with path rejected", bedrockKey(&schemas.BedrockEndpointsConfig{DNSSuffix: "evil.com/path"}), true,
-			"endpoints.dns_suffix"},
+			"endpoints.dns_suffix", false},
 		{"dns_suffix with whitespace rejected", bedrockKey(&schemas.BedrockEndpointsConfig{DNSSuffix: "c2s ic gov"}), true,
-			"endpoints.dns_suffix"},
+			"endpoints.dns_suffix", false},
 		{"dns_suffix dots-only rejected", bedrockKey(&schemas.BedrockEndpointsConfig{DNSSuffix: "..."}), true,
-			"endpoints.dns_suffix"},
+			"endpoints.dns_suffix", false},
 		{"dns_suffix leading hyphen rejected", bedrockKey(&schemas.BedrockEndpointsConfig{DNSSuffix: "-bad.example"}), true,
-			"endpoints.dns_suffix"},
+			"endpoints.dns_suffix", false},
 		{"dns_suffix unresolvable rejected by probe", bedrockKey(&schemas.BedrockEndpointsConfig{DNSSuffix: "test.invalid"}), true,
-			"endpoints.dns_suffix"},
-		{"dns_suffix commercial partition ok (resolves via live DNS)", bedrockKey(&schemas.BedrockEndpointsConfig{DNSSuffix: "amazonaws.com"}), false, ""},
-		{"dns_suffix stray dots trimmed before probe (resolves via live DNS)", bedrockKey(&schemas.BedrockEndpointsConfig{DNSSuffix: ".amazonaws.com."}), false, ""},
+			"endpoints.dns_suffix", true},
+		{"dns_suffix commercial partition ok", bedrockKey(&schemas.BedrockEndpointsConfig{DNSSuffix: "amazonaws.com"}), false, "", true},
+		{"dns_suffix stray dots trimmed before probe", bedrockKey(&schemas.BedrockEndpointsConfig{DNSSuffix: ".amazonaws.com."}), false, "", true},
+		// Probes cover only services WITHOUT an explicit override: with all
+		// four amazonaws-shaped services overridden, no probe runs at all and
+		// a suffix that would fail resolution passes (offline-deterministic).
+		{"dns_suffix probe skipped when all services explicitly overridden", bedrockKey(&schemas.BedrockEndpointsConfig{
+			DNSSuffix:    "test.invalid",
+			Runtime:      "http://127.0.0.1:9",
+			ControlPlane: "http://127.0.0.1:9",
+			AgentRuntime: "http://127.0.0.1:9",
+			S3:           "http://127.0.0.1:9",
+		}), false, "", false},
+		// With only the runtime service overridden, the probe still runs for
+		// the remaining labels and the bad suffix is caught.
+		{"dns_suffix probed for non-overridden services", bedrockKey(&schemas.BedrockEndpointsConfig{
+			DNSSuffix: "test.invalid",
+			Runtime:   "http://127.0.0.1:9",
+		}), true, "endpoints.dns_suffix", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.needsDNS && os.Getenv("BIFROST_TEST_LIVE_DNS") == "" {
+				t.Skip("requires outbound DNS; set BIFROST_TEST_LIVE_DNS=1 to run")
+			}
 			err := validateBedrockKeyEndpoints(tc.key, tc.allowPrivate)
 			if tc.wantErr == "" {
 				if err != nil {

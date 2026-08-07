@@ -3136,7 +3136,9 @@ func (provider *BedrockProvider) BatchCreate(ctx *schemas.BifrostContext, key sc
 		inputS3URI := deriveInputS3URIFromOutput(outputS3Uri, inputKey)
 		bucket, s3Key := parseS3URI(inputS3URI)
 
-		// Upload to S3 using Bedrock credentials
+		// Upload to S3 using Bedrock credentials. Only the explicit per-key
+		// endpoints.s3 override is threaded through — the AWS SDK already
+		// honors the AWS_ENDPOINT_URL_* env layer natively.
 		if bifrostErr := uploadToS3(
 			ctx,
 			key.BedrockKeyConfig.AccessKey.GetValue(),
@@ -3145,6 +3147,7 @@ func (provider *BedrockProvider) BatchCreate(ctx *schemas.BifrostContext, key sc
 			region,
 			bucket,
 			s3Key,
+			keyEndpointOverride(key, serviceS3),
 			jsonlData,
 		); bifrostErr != nil {
 			return nil, bifrostErr

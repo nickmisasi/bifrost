@@ -15,12 +15,17 @@ import (
 )
 
 // uploadToS3 uploads content to an S3 bucket using the provided credentials.
+// endpoint, when non-empty, is an explicit per-key endpoints.s3 override and
+// is applied as the SDK BaseEndpoint with path-style addressing (matching
+// s3BucketBase). The AWS_ENDPOINT_URL_* env layer is honored natively by the
+// SDK, so it must not be passed here.
 func uploadToS3(
 	ctx context.Context,
 	accessKey, secretKey string,
 	sessionToken *string,
 	region string,
 	bucket, key string,
+	endpoint string,
 	content []byte,
 ) *schemas.BifrostError {
 	// Create AWS config with credentials
@@ -50,7 +55,12 @@ func uploadToS3(
 	}
 
 	// Create S3 client
-	client := s3.NewFromConfig(cfg)
+	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
+		if endpoint != "" {
+			o.BaseEndpoint = aws.String(endpoint)
+			o.UsePathStyle = true
+		}
+	})
 
 	// Upload the content
 	_, err = client.PutObject(ctx, &s3.PutObjectInput{

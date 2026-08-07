@@ -684,14 +684,32 @@ func validateBedrockKeyEndpoints(key schemas.Key, allowPrivateNetwork bool) erro
 			return fmt.Errorf("invalid bedrock_key_config.endpoints.dns_suffix: %q is loopback-reserved (RFC 6761); use explicit endpoint URLs for local development", ep.DNSSuffix)
 		}
 		// dns_suffix redirects every amazonaws.com-shaped service exactly like
-		// an explicit endpoint does, so probe the resulting runtime host
-		// through the same SSRF gate the URL fields go through.
+		// an explicit endpoint does, so probe each derived host through the
+		// same SSRF gate the URL fields go through, skipping services whose
+		// explicit override takes precedence (those were validated above).
+		// Best-effort: the S3 host is bucket-prefixed at request time, so the
+		// bare "s3." label is an approximation, and an attacker-controlled DNS
+		// zone can flip records after save — the provider's dial-time guard is
+		// the authoritative defense.
 		region := "us-east-1" // placeholder; validateProviderKeyURL guarantees a real region on Bedrock keys
 		if key.BedrockKeyConfig.Region != nil && key.BedrockKeyConfig.Region.GetValue() != "" {
 			region = key.BedrockKeyConfig.Region.GetValue()
 		}
-		if err := bifrost.ValidateExternalURL(fmt.Sprintf("https://bedrock-runtime.%s.%s", region, suffix), allowPrivateNetwork); err != nil {
-			return fmt.Errorf("invalid bedrock_key_config.endpoints.dns_suffix: %v", err)
+		for _, service := range []struct {
+			label    string
+			override string
+		}{
+			{"bedrock-runtime", ep.Runtime},
+			{"bedrock", ep.ControlPlane},
+			{"bedrock-agent-runtime", ep.AgentRuntime},
+			{"s3", ep.S3},
+		} {
+			if service.override != "" {
+				continue
+			}
+			if err := bifrost.ValidateExternalURL(fmt.Sprintf("https://%s.%s.%s", service.label, region, suffix), allowPrivateNetwork); err != nil {
+				return fmt.Errorf("invalid bedrock_key_config.endpoints.dns_suffix: %v", err)
+			}
 		}
 	}
 	return nil

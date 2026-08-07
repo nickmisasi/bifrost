@@ -149,6 +149,27 @@ func TestAgentRuntimeHonorsEndpointOverride(t *testing.T) {
 	assert.Equal(t, hostOf(ts), reqs[0].host)
 }
 
+// TestAgentRuntimeHonorsPathPrefixedEndpointOverride drives a real request
+// through an override carrying a path prefix (the corporate-gateway use case):
+// the prefix must survive into the request path ahead of the API path.
+func TestAgentRuntimeHonorsPathPrefixedEndpointOverride(t *testing.T) {
+	clearEndpointEnv(t)
+	ts, rec := newRecordingServer(t, "application/json", `{}`)
+	provider := newTestProviderWithBaseURL(t, "")
+	key := testBedrockKey()
+	key.BedrockKeyConfig.Endpoints = &schemas.BedrockEndpointsConfig{AgentRuntime: ts.URL + "/proxy/bedrock"}
+
+	body, _, _, bifrostErr := provider.completeAgentRuntimeRequest(testBedrockCtx(), []byte(`{}`), "/rerank", key)
+	require.Nil(t, bifrostErr)
+	assert.Equal(t, `{}`, string(body))
+
+	reqs := rec.all()
+	require.Len(t, reqs, 1)
+	assert.Equal(t, http.MethodPost, reqs[0].method)
+	assert.Equal(t, "/proxy/bedrock/rerank", reqs[0].uri)
+	assert.Equal(t, hostOf(ts), reqs[0].host)
+}
+
 // testBedrockSigV4Key returns a key with static SigV4 credentials (no bearer
 // Value) so request paths take the signing branch, plus the given overrides.
 func testBedrockSigV4Key(ep *schemas.BedrockEndpointsConfig) schemas.Key {
@@ -250,6 +271,50 @@ func TestDialGuardBlocksPrivateEndpointOverride(t *testing.T) {
 	require.NotNil(t, bifrostErr.Error)
 	require.NotNil(t, bifrostErr.Error.Error)
 	assert.Contains(t, bifrostErr.Error.Error.Error(), "private IP")
+}
+
+// TestBatchCreateInlineUploadHonorsS3EndpointOverride drives BatchCreate's
+// inline-requests path end to end: the JSONL input upload (which goes through
+// the AWS SDK, not the provider's raw HTTP path) must land on the per-key
+// endpoints.s3 override with path-style addressing, consistent with every
+// other S3 operation, and the job submission must hit the control-plane
+// override.
+func TestBatchCreateInlineUploadHonorsS3EndpointOverride(t *testing.T) {
+	clearEndpointEnv(t)
+	tsS3, recS3 := newRecordingServer(t, "application/xml", "")
+	tsCP, recCP := newRecordingServer(t, "application/json", `{"jobArn":"arn:aws:bedrock:us-east-1:123456789012:model-invocation-job/test"}`)
+	provider := newTestProviderWithBaseURL(t, "")
+	key := testBedrockSigV4Key(&schemas.BedrockEndpointsConfig{S3: tsS3.URL, ControlPlane: tsCP.URL})
+
+	resp, bifrostErr := provider.BatchCreate(testBedrockCtx(), key, &schemas.BifrostBatchCreateRequest{
+		Model: schemas.Ptr("anthropic.claude-3-haiku-20240307-v1:0"),
+		Requests: []schemas.BatchRequestItem{
+			{CustomID: "r1", Body: map[string]interface{}{"messages": []interface{}{}}},
+		},
+		ExtraParams: map[string]interface{}{
+			"role_arn":      "arn:aws:iam::123456789012:role/batch",
+			"output_s3_uri": "s3://test-bucket/output/",
+		},
+	})
+	require.Nil(t, bifrostErr)
+	require.NotNil(t, resp)
+
+	s3Reqs := recS3.all()
+	require.Len(t, s3Reqs, 1, "inline JSONL upload must hit the endpoints.s3 override")
+	assert.Equal(t, http.MethodPut, s3Reqs[0].method)
+	assert.True(t, strings.HasPrefix(s3Reqs[0].uri, "/test-bucket/bifrost-batch-input/"),
+		"path-style bucket expected, got %q", s3Reqs[0].uri)
+	assert.Equal(t, hostOf(tsS3), s3Reqs[0].host)
+	assert.Regexp(t, `/us-east-1/s3/aws4_request`, s3Reqs[0].header.Get("Authorization"))
+
+	// Job creation POST plus the follow-up GET that fetches the created job.
+	cpReqs := recCP.all()
+	require.Len(t, cpReqs, 2)
+	assert.Equal(t, http.MethodPost, cpReqs[0].method)
+	assert.Equal(t, "/model-invocation-job", cpReqs[0].uri)
+	assert.Equal(t, hostOf(tsCP), cpReqs[0].host)
+	assert.Equal(t, http.MethodGet, cpReqs[1].method)
+	assert.Equal(t, hostOf(tsCP), cpReqs[1].host)
 }
 
 // TestSigV4SigningOverCustomHost locks in that SigV4 signing follows the

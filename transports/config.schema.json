@@ -4091,30 +4091,36 @@
                     "runtime": {
                       "type": "string",
                       "format": "uri",
+                      "pattern": "^https?://[^?#]*$",
                       "description": "Override for the bedrock-runtime endpoint (Converse/Invoke/CountTokens, unary and streaming), e.g. a VPC endpoint URL."
                     },
                     "control_plane": {
                       "type": "string",
                       "format": "uri",
+                      "pattern": "^https?://[^?#]*$",
                       "description": "Override for the bedrock control-plane endpoint (ListFoundationModels, model-invocation-job batch APIs)."
                     },
                     "agent_runtime": {
                       "type": "string",
                       "format": "uri",
+                      "pattern": "^https?://[^?#]*$",
                       "description": "Override for the bedrock-agent-runtime endpoint (Rerank)."
                     },
                     "s3": {
                       "type": "string",
                       "format": "uri",
+                      "pattern": "^https?://[^?#]*$",
                       "description": "Override for the S3 endpoint used for file/batch storage. Path-style addressing ({endpoint}/{bucket}/...) is used when set."
                     },
                     "mantle": {
                       "type": "string",
                       "format": "uri",
+                      "pattern": "^https?://[^?#]*$",
                       "description": "Override for the bedrock-mantle OpenAI-compatible endpoint (gpt-*/Gemma-4 models)."
                     },
                     "dns_suffix": {
                       "type": "string",
+                      "pattern": "^\\s*\\.*[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?\\.*\\s*$",
                       "description": "Replaces the amazonaws.com partition DNS suffix in every default host shape at once (e.g. c2s.ic.gov for aws-iso, sc2s.sgov.gov for aws-iso-b, amazonaws.com.cn for aws-cn). Explicit URL fields take precedence per service. Does not apply to mantle."
                     }
                   },

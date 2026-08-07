@@ -82,10 +82,14 @@ func keyEndpointOverride(key schemas.Key, service bedrockService) string {
 }
 
 // dnsSuffixOverride returns the partition DNS suffix from the key config,
-// or the commercial default.
+// or the commercial default. Surrounding whitespace and dots are trimmed —
+// mirroring what the gateway validator normalizes — so a suffix that passed
+// save-time validation can never yield a malformed host here.
 func dnsSuffixOverride(key schemas.Key) string {
-	if key.BedrockKeyConfig != nil && key.BedrockKeyConfig.Endpoints != nil && key.BedrockKeyConfig.Endpoints.DNSSuffix != "" {
-		return strings.Trim(key.BedrockKeyConfig.Endpoints.DNSSuffix, ".")
+	if key.BedrockKeyConfig != nil && key.BedrockKeyConfig.Endpoints != nil {
+		if suffix := strings.Trim(strings.TrimSpace(key.BedrockKeyConfig.Endpoints.DNSSuffix), "."); suffix != "" {
+			return suffix
+		}
 	}
 	return defaultPartitionSuffix
 }
