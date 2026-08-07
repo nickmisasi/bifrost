@@ -417,6 +417,31 @@ When only `region` is set, Bifrost inherits credentials from the AWS SDK default
 }
 ```
 
+**Custom endpoints** (VPC endpoints, ISO/China partitions, FIPS — see [Bedrock custom endpoints](/providers/supported-providers/bedrock#custom-endpoints-vpc-endpoints-iso-and-china-partitions-fips)):
+
+```json
+{
+  "bedrock_key_config": {
+    "region": "us-east-1",
+    "endpoints": {
+      "runtime": "https://vpce-0abc123-xyz.bedrock-runtime.us-east-1.vpce.amazonaws.com",
+      "control_plane": "https://vpce-0def456-uvw.bedrock.us-east-1.vpce.amazonaws.com"
+    }
+  }
+}
+```
+
+| `endpoints` field | Overrides |
+|-------------------|-----------|
+| `runtime` | bedrock-runtime endpoint (Converse/Invoke/CountTokens, unary and streaming) |
+| `control_plane` | bedrock control-plane endpoint (ListModels, batch jobs) |
+| `agent_runtime` | bedrock-agent-runtime endpoint (Rerank) |
+| `s3` | S3 endpoint for file/batch storage (switches to path-style addressing) |
+| `mantle` | bedrock-mantle OpenAI-compatible endpoint (gpt-*/Gemma-4 models) |
+| `dns_suffix` | Partition DNS suffix in every default host shape at once (e.g. `c2s.ic.gov`); explicit URLs above take precedence; does not apply to mantle |
+
+Unset services fall back to `network_config.base_url` (bedrock-runtime only), then the `AWS_ENDPOINT_URL_*` environment variables, then `dns_suffix`, then the commercial-partition default.
+
 </Tab>
 
 <Tab title="AWS Bedrock Mantle">

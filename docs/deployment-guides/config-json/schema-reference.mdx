@@ -114,6 +114,8 @@ Keyed by provider name. Each entry contains a `keys` array and optional `network
 
 Supported provider keys: `openai`, `anthropic`, `azure`, `bedrock`, `vertex`, `gemini`, `mistral`, `groq`, `cohere`, `perplexity`, `xai`, `cerebras`, `deepseek`, `openrouter`, `nebius`, `fireworks`, `parasail`, `huggingface`, `replicate`, `ollama`, `vllm`, `sgl`, `elevenlabs`, `runway`.
 
+Bedrock keys additionally support a `bedrock_key_config.endpoints` object with per-service AWS endpoint overrides (`runtime`, `control_plane`, `agent_runtime`, `s3`, `mantle`, `dns_suffix`) for VPC endpoints, ISO/China partitions, and FIPS hosts.
+
 Full documentation: [Provider Setup](/deployment-guides/config-json/providers).
 
 ---

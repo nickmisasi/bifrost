@@ -457,6 +457,7 @@ func (a *MyAccount) GetKeysForProvider(ctx *context.Context, provider schemas.Mo
 | `role_arn`      | No       | -                 | IAM role ARN for STS AssumeRole                                                                                       |
 | `external_id`   | No       | -                 | External ID for AssumeRole (when required by trust policy)                                                            |
 | `session_name`  | No       | `bifrost-session` | Session name for AssumeRole CloudTrail logs                                                                           |
+| `endpoints`     | No       | -                 | Per-service AWS endpoint overrides (see [Custom Endpoints](#custom-endpoints-vpc-endpoints-iso-and-china-partitions-fips)) |
 
 **Key-level fields:**
 
@@ -464,6 +465,107 @@ func (a *MyAccount) GetKeysForProvider(ctx *context.Context, provider schemas.Mo
 | --------- | -------- | ----------------------------------------------------------------------------------- |
 | `aliases` | No       | Map model names to inference profile IDs or Bedrock model IDs (v1.5.0-prerelease2+) |
 | `models`  | Yes      | Models this key can serve; use `["*"]` to allow all                                 |
+
+---
+
+## Custom Endpoints (VPC Endpoints, ISO and China Partitions, FIPS)
+
+Bifrost resolves the AWS endpoint for every Bedrock request through a layered precedence chain. For each service (`bedrock-runtime`, `bedrock` control plane, `bedrock-agent-runtime`, S3, mantle), the first match wins:
+
+1. `bedrock_key_config.endpoints.<service>` — explicit per-service URL on the key
+2. `network_config.base_url` — applies to the **bedrock-runtime inference endpoint only**
+3. `AWS_ENDPOINT_URL_<SERVICE>`, then the generic `AWS_ENDPOINT_URL` environment variable
+4. `bedrock_key_config.endpoints.dns_suffix` — default host shapes on a different partition suffix
+5. Built-in commercial-partition default (`amazonaws.com` / `api.aws`) — today's behavior
+
+Override URLs must be absolute `http(s)` URLs without a query or fragment (Bifrost appends request paths to them). The gateway validates every override — including `dns_suffix` — at key create/update time, with the same private-network gating as `base_url`.
+
+`base_url` affects only inference (Converse/Invoke/CountTokens, unary and streaming). It never applies to ListModels, batch jobs, Rerank, S3 storage, or the mantle surface — each AWS service has its own endpoint, so a runtime URL would be wrong for them. The SigV4 signing region always stays the configured `region` (and the signing service names stay `bedrock` / `s3` / `bedrock-mantle`); nothing is ever derived from the hostname, which is exactly what VPC endpoints, FIPS hosts, and ISO partitions require.
+
+<Note>
+  A `base_url` configured on a Bedrock provider was silently ignored by
+  older Bifrost versions. It now takes effect for inference requests.
+</Note>
+
+### VPC Endpoints (PrivateLink)
+
+Point `network_config.base_url` at a bedrock-runtime VPC endpoint. VPCE hostnames resolve to private IPs, so the gateway's SSRF protection requires `"allow_private_network": true`:
+
+```json
+{
+  "providers": {
+    "bedrock": {
+      "network_config": {
+        "base_url": "https://vpce-0abc123-xyz.bedrock-runtime.us-east-1.vpce.amazonaws.com",
+        "allow_private_network": true
+      }
+    }
+  }
+}
+```
+
+Each AWS service has its own VPC endpoint. If other services must also stay on PrivateLink, set per-key overrides:
+
+```json
+{
+  "bedrock_key_config": {
+    "region": "us-east-1",
+    "endpoints": {
+      "runtime": "https://vpce-0abc123-xyz.bedrock-runtime.us-east-1.vpce.amazonaws.com",
+      "control_plane": "https://vpce-0def456-uvw.bedrock.us-east-1.vpce.amazonaws.com"
+    }
+  }
+}
+```
+
+### FIPS Endpoints
+
+Use per-key overrides for the `-fips` hostname variants (available in us-east-1, us-east-2, us-west-2, ca-central-1, and GovCloud). FIPS hosts sign with the unchanged `bedrock` service name:
+
+```json
+{
+  "bedrock_key_config": {
+    "region": "us-east-1",
+    "endpoints": {
+      "runtime": "https://bedrock-runtime-fips.us-east-1.amazonaws.com",
+      "control_plane": "https://bedrock-fips.us-east-1.amazonaws.com"
+    }
+  }
+}
+```
+
+### ISO / China Partitions
+
+`dns_suffix` replaces the `amazonaws.com` partition suffix in the runtime, control-plane, agent-runtime, and S3 host shapes at once (mantle does not exist in ISO partitions and is unaffected):
+
+```json
+{
+  "bedrock_key_config": {
+    "region": "us-iso-east-1",
+    "endpoints": { "dns_suffix": "c2s.ic.gov" }
+  }
+}
+```
+
+Use `sc2s.sgov.gov` for `us-isob-*` regions and `amazonaws.com.cn` for China regions. Explicit `endpoints.<service>` URLs take precedence over `dns_suffix` per service.
+
+### Environment Variables
+
+Bifrost honors the AWS SDK-standard endpoint environment variables. They are captured once when the provider starts, and explicit configuration (key `endpoints` or `base_url`) always wins over them:
+
+| Variable                                 | Service                                             |
+| ---------------------------------------- | --------------------------------------------------- |
+| `AWS_ENDPOINT_URL_BEDROCK_RUNTIME`       | bedrock-runtime (inference)                         |
+| `AWS_ENDPOINT_URL_BEDROCK`               | bedrock control plane (ListModels, batch jobs)      |
+| `AWS_ENDPOINT_URL_BEDROCK_AGENT_RUNTIME` | bedrock-agent-runtime (Rerank)                      |
+| `AWS_ENDPOINT_URL_S3`                    | S3 (file/batch storage)                             |
+| `AWS_ENDPOINT_URL_BEDROCK_MANTLE`        | bedrock-mantle (OpenAI-compatible surface)          |
+| `AWS_ENDPOINT_URL`                       | All of the above (service-specific vars take precedence) |
+| `AWS_IGNORE_CONFIGURED_ENDPOINT_URLS`    | Set to `true` to ignore all endpoint env vars       |
+
+### S3 Addressing
+
+With no override (or with only `dns_suffix`), S3 requests use virtual-hosted-style addressing (`https://{bucket}.s3.{region}.{suffix}/...`). When an explicit S3 endpoint override is set (key config or env var), Bifrost switches to path-style addressing (`{endpoint}/{bucket}/...`), so a single S3 VPC endpoint or S3-compatible emulator URL serves every bucket.
 
 ---
 
