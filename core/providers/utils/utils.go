@@ -599,6 +599,86 @@ func ConfigureDialer(client *fasthttp.Client, allowPrivateNetwork bool) *fasthtt
 	return client
 }
 
+// ipResolver resolves a hostname to IPs. *net.Resolver satisfies it; tests
+// substitute a fake to exercise the dial policy without real DNS.
+type ipResolver interface {
+	LookupIP(ctx context.Context, network, host string) ([]net.IP, error)
+}
+
+// ConfigureHTTPTransportDialer is the net/http analogue of ConfigureDialer's
+// SSRF policy, for providers whose primary client is an http.Transport (e.g.
+// Bedrock). It sets transport.DialContext to resolve DNS itself, apply the
+// private-network policy to every resolved IP — unspecified and link-local
+// always blocked, RFC 1918 blocked unless allowPrivateNetwork, loopback always
+// allowed — and dial the validated IP literal directly, closing the DNS
+// rebinding window between ValidateExternalURL (save time) and the connection.
+// The check re-runs on every dial, so it also holds across redirects and
+// connection-pool re-dials. Keepalive parameters match ConfigureDialer.
+//
+// Clients that share the transport (e.g. the streaming sibling built by
+// BuildStreamingHTTPClient) inherit the guard automatically. When the
+// transport routes through a proxy, DialContext receives the proxy address,
+// so the policy applies to the proxy host rather than the target.
+func ConfigureHTTPTransportDialer(transport *http.Transport, dialTimeout time.Duration, allowPrivateNetwork bool) *http.Transport {
+	transport.DialContext = httpPolicyDialContext(net.DefaultResolver, nil, dialTimeout, allowPrivateNetwork)
+	return transport
+}
+
+// httpPolicyDialContext is the seam behind ConfigureHTTPTransportDialer, with
+// injectable resolver and dial for hermetic tests. A nil dial defaults to a
+// keepalive-enabled net.Dialer.
+func httpPolicyDialContext(resolver ipResolver, dial func(ctx context.Context, network, addr string) (net.Conn, error), dialTimeout time.Duration, allowPrivateNetwork bool) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	if dial == nil {
+		dialer := &net.Dialer{
+			Timeout: dialTimeout,
+			KeepAliveConfig: net.KeepAliveConfig{
+				Enable:   true,
+				Idle:     10 * time.Second,
+				Interval: 5 * time.Second,
+				Count:    3,
+			},
+		}
+		dial = dialer.DialContext
+	}
+	return func(ctx context.Context, netw, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		resolveCtx := ctx
+		if dialTimeout > 0 {
+			var cancel context.CancelFunc
+			resolveCtx, cancel = context.WithTimeout(ctx, dialTimeout)
+			defer cancel()
+		}
+		ips, err := resolver.LookupIP(resolveCtx, "ip", host)
+		if err != nil {
+			return nil, err
+		}
+		var lastErr error
+		for _, ip := range ips {
+			if ip.IsUnspecified() {
+				return nil, fmt.Errorf("connection to unspecified IP %s is not allowed", ip)
+			}
+			if network.IsLinkLocal(ip) {
+				return nil, fmt.Errorf("connection to link-local IP %s is not allowed", ip)
+			}
+			if !ip.IsLoopback() && !allowPrivateNetwork && network.IsPrivateIP(ip) {
+				return nil, fmt.Errorf("connection to private IP %s is not allowed", ip)
+			}
+			conn, dialErr := dial(ctx, netw, net.JoinHostPort(ip.String(), port))
+			if dialErr == nil {
+				return conn, nil
+			}
+			lastErr = dialErr
+		}
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, fmt.Errorf("no usable address resolved for %s", host)
+	}
+}
+
 // ConfigureProxy sets up a proxy for the fasthttp client based on the provided configuration.
 // It supports HTTP, SOCKS5, and environment-based proxy configurations.
 // Returns the configured client or the original client if proxy configuration is invalid.

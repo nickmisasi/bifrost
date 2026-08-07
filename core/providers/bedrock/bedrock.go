@@ -103,6 +103,13 @@ func NewBedrockProvider(config *schemas.ProviderConfig, logger schemas.Logger) (
 		ForceAttemptHTTP2:     config.NetworkConfig.EnforceHTTP2,
 	}
 
+	// Enforce the private-network policy at dial time (same policy as the
+	// fasthttp providers' ConfigureDialer): with custom endpoint overrides the
+	// net/http client now reaches operator-supplied URLs, so the save-time
+	// ValidateExternalURL check alone would be bypassable via DNS rebinding.
+	// The streaming client shares this transport and inherits the guard.
+	providerUtils.ConfigureHTTPTransportDialer(transport, requestTimeout, config.NetworkConfig.AllowPrivateNetwork)
+
 	// Disable HTTP/2 auto-negotiation when not explicitly enforced.
 	// ForceAttemptHTTP2=false alone does NOT prevent HTTP/2 — Go's http2 package
 	// auto-registers h2 via TLSNextProto in init(). Setting TLSNextProto to an

@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -415,6 +416,167 @@ func TestConfigureDialer_DialError(t *testing.T) {
 		t.Fatal("expected error from failed proxy dial")
 	}
 	t.Logf("Got expected error: %v", err)
+}
+
+// fakeIPResolver maps hostnames to fixed IPs so the dial policy can be
+// exercised without real DNS (hermetic against sandboxed/air-gapped runs).
+type fakeIPResolver struct {
+	ips map[string][]net.IP
+}
+
+func (f *fakeIPResolver) LookupIP(_ context.Context, _, host string) ([]net.IP, error) {
+	if ips, ok := f.ips[host]; ok {
+		return ips, nil
+	}
+	return nil, fmt.Errorf("no such host: %s", host)
+}
+
+// stubDial records the address it was asked to dial and returns one end of an
+// in-memory pipe, so no TCP socket is ever opened.
+func stubDial(dialed *[]string) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return func(_ context.Context, _, addr string) (net.Conn, error) {
+		*dialed = append(*dialed, addr)
+		client, server := net.Pipe()
+		server.Close()
+		return client, nil
+	}
+}
+
+// TestHTTPPolicyDialContext_PrivatePolicy verifies the net/http dial guard's
+// private-network policy: RFC 1918 targets are blocked before any dial when
+// allowPrivateNetwork=false and permitted when the operator opts in — the same
+// policy ConfigureDialer enforces for fasthttp clients.
+func TestHTTPPolicyDialContext_PrivatePolicy(t *testing.T) {
+	resolver := &fakeIPResolver{ips: map[string][]net.IP{
+		"internal.corp": {net.ParseIP("10.0.0.5")},
+	}}
+
+	t.Run("blocked by default", func(t *testing.T) {
+		var dialed []string
+		dialCtx := httpPolicyDialContext(resolver, stubDial(&dialed), time.Second, false)
+		_, err := dialCtx(context.Background(), "tcp", "internal.corp:443")
+		if err == nil || !strings.Contains(err.Error(), "private IP") {
+			t.Fatalf("expected private-IP rejection, got %v", err)
+		}
+		if len(dialed) != 0 {
+			t.Errorf("no dial should happen for a blocked target, dialed %v", dialed)
+		}
+	})
+
+	t.Run("allowed when allow_private_network=true", func(t *testing.T) {
+		var dialed []string
+		dialCtx := httpPolicyDialContext(resolver, stubDial(&dialed), time.Second, true)
+		conn, err := dialCtx(context.Background(), "tcp", "internal.corp:443")
+		if err != nil {
+			t.Fatalf("expected dial to proceed with opt-in, got %v", err)
+		}
+		conn.Close()
+		if len(dialed) != 1 || dialed[0] != "10.0.0.5:443" {
+			t.Errorf("expected dial to the resolved IP literal, dialed %v", dialed)
+		}
+	})
+}
+
+// TestHTTPPolicyDialContext_LoopbackAlwaysAllowed verifies loopback targets
+// pass regardless of the private-network setting (this is what keeps httptest
+// servers reachable in provider e2e tests without weakening the guard).
+func TestHTTPPolicyDialContext_LoopbackAlwaysAllowed(t *testing.T) {
+	resolver := &fakeIPResolver{ips: map[string][]net.IP{
+		"local.test": {net.ParseIP("127.0.0.1")},
+	}}
+	var dialed []string
+	dialCtx := httpPolicyDialContext(resolver, stubDial(&dialed), time.Second, false)
+	conn, err := dialCtx(context.Background(), "tcp", "local.test:8080")
+	if err != nil {
+		t.Fatalf("loopback must always be allowed, got %v", err)
+	}
+	conn.Close()
+	if len(dialed) != 1 || dialed[0] != "127.0.0.1:8080" {
+		t.Errorf("expected loopback dial, dialed %v", dialed)
+	}
+}
+
+// TestHTTPPolicyDialContext_AlwaysBlocked verifies unspecified and link-local
+// addresses are rejected even with allow_private_network=true.
+func TestHTTPPolicyDialContext_AlwaysBlocked(t *testing.T) {
+	resolver := &fakeIPResolver{ips: map[string][]net.IP{
+		"metadata.test":    {net.ParseIP("169.254.169.254")},
+		"unspecified.test": {net.ParseIP("0.0.0.0")},
+	}}
+	for _, tt := range []struct {
+		addr    string
+		wantErr string
+	}{
+		{"metadata.test:80", "link-local IP"},
+		{"unspecified.test:80", "unspecified IP"},
+	} {
+		var dialed []string
+		dialCtx := httpPolicyDialContext(resolver, stubDial(&dialed), time.Second, true)
+		_, err := dialCtx(context.Background(), "tcp", tt.addr)
+		if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+			t.Errorf("%s: expected %q rejection, got %v", tt.addr, tt.wantErr, err)
+		}
+		if len(dialed) != 0 {
+			t.Errorf("%s: no dial should happen, dialed %v", tt.addr, dialed)
+		}
+	}
+}
+
+// TestHTTPPolicyDialContext_DialsResolvedIP verifies the guard dials the IP it
+// validated rather than re-resolving the hostname, closing the DNS-rebinding
+// TOCTOU between validation and connection.
+func TestHTTPPolicyDialContext_DialsResolvedIP(t *testing.T) {
+	resolver := &fakeIPResolver{ips: map[string][]net.IP{
+		"rebind.test": {net.ParseIP("93.184.216.34")},
+	}}
+	var dialed []string
+	dialCtx := httpPolicyDialContext(resolver, stubDial(&dialed), time.Second, false)
+	conn, err := dialCtx(context.Background(), "tcp", "rebind.test:443")
+	if err != nil {
+		t.Fatalf("public target should dial, got %v", err)
+	}
+	conn.Close()
+	if len(dialed) != 1 || dialed[0] != "93.184.216.34:443" {
+		t.Errorf("expected dial to validated IP literal, dialed %v", dialed)
+	}
+}
+
+// TestConfigureHTTPTransportDialer_EndToEnd verifies the exported entry point
+// installs the guard on the transport, that a client sharing the transport via
+// BuildStreamingHTTPClient inherits it, and that loopback traffic still flows
+// with allow_private_network=false.
+func TestConfigureHTTPTransportDialer_EndToEnd(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "ok")
+	}))
+	defer server.Close()
+
+	transport := &http.Transport{}
+	if transport.DialContext != nil {
+		t.Fatal("precondition: DialContext should be nil")
+	}
+	ConfigureHTTPTransportDialer(transport, time.Second, false)
+	if transport.DialContext == nil {
+		t.Fatal("ConfigureHTTPTransportDialer should set DialContext")
+	}
+
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+	streamingClient := BuildStreamingHTTPClient(client)
+	if streamingClient.Transport != transport {
+		t.Fatal("streaming client must share the guarded transport")
+	}
+
+	for name, c := range map[string]*http.Client{"unary": client, "streaming": streamingClient} {
+		resp, err := c.Get(server.URL)
+		if err != nil {
+			t.Fatalf("%s client: loopback request should succeed under the guard: %v", name, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s client: expected 200, got %d", name, resp.StatusCode)
+		}
+	}
 }
 
 // TestStaleConnectionRetryIfErr_WrappedErrors verifies behavior with wrapped errors.

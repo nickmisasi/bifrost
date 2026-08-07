@@ -225,6 +225,33 @@ func TestFileListHonorsS3EndpointOverride(t *testing.T) {
 	assert.Regexp(t, `/us-east-1/s3/aws4_request`, reqs[0].header.Get("Authorization"))
 }
 
+// TestDialGuardBlocksPrivateEndpointOverride proves the provider's net/http
+// transport enforces the private-network policy at dial time: an endpoint
+// override pointing at an RFC 1918 address is rejected before any packet is
+// sent when allow_private_network is false (the default in these tests). The
+// IP-literal target keeps this hermetic — no DNS, no connection attempt.
+//
+// Note the rest of this file's httptest servers bind 127.0.0.1: loopback is
+// always allowed by the policy (mirroring ConfigureDialer for fasthttp
+// providers), so those tests need no allow_private_network opt-in and double
+// as proof that loopback traffic flows under the guard. The
+// allow_private_network=true permit path is covered hermetically by
+// TestHTTPPolicyDialContext_PrivatePolicy in providers/utils.
+func TestDialGuardBlocksPrivateEndpointOverride(t *testing.T) {
+	clearEndpointEnv(t)
+	provider := newTestProviderWithBaseURL(t, "")
+	key := testBedrockKey()
+	// TEST-NET-style private target; port 9 (discard) would hang or refuse if
+	// the guard failed to reject pre-dial.
+	key.BedrockKeyConfig.Endpoints = &schemas.BedrockEndpointsConfig{Runtime: "http://10.255.255.1:9"}
+
+	_, _, _, bifrostErr := provider.completeRequest(testBedrockCtx(), []byte(`{"messages":[]}`), "model-id/converse", key, "model-id")
+	require.NotNil(t, bifrostErr)
+	require.NotNil(t, bifrostErr.Error)
+	require.NotNil(t, bifrostErr.Error.Error)
+	assert.Contains(t, bifrostErr.Error.Error.Error(), "private IP")
+}
+
 // TestSigV4SigningOverCustomHost locks in that SigV4 signing follows the
 // overridden URL: the signed host is the custom host (including its
 // non-default port) and the credential scope keeps the configured region and
